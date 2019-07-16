@@ -48,26 +48,22 @@ namespace Repro
                     throw new Exception("Failed to create session...");
                 }
 
-                var sawStacks = new ManualResetEvent(false);
-
                 var readerTask = new Task(() =>
                 {
                     using (var file = File.OpenWrite(tempNetTraceFilename))
                     {
-                        int nBytes = 0;
                         int b = 0;
                         while ((b = eventPipeStream.ReadByte()) != -1)
-                        {
-                            nBytes++;
                             file.WriteByte((byte)b);
-                            if (nBytes > 10)
-                                sawStacks.Set();
-                        }
                     }
                 });
 
                 readerTask.Start();
-                sawStacks.WaitOne();
+
+                // Wait 500ms to ensure we get enough stack samples to have seen the first 
+                // stack from every thread.
+                Thread.Sleep(500);
+
                 EventPipeClient.StopTracing(pid, eventPipeSessionId);
                 readerTask.Wait();
 
@@ -90,7 +86,7 @@ namespace Repro
                         var stackIndex = sample.StackIndex;
                         while (!stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), false).StartsWith("Thread ("))
                             stackIndex = stackSource.GetCallerIndex(stackIndex);
-                        
+
                         var threadName = stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), false);
                         if (samplesForThread.TryGetValue(threadName, out var samples))
                         {
