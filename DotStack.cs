@@ -2,10 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Symbols;
-using Microsoft.Diagnostics.Tools.RuntimeClient;
+using Microsoft.Diagnostics.NETCore.Client;
 using Microsoft.Diagnostics.Tracing;
 using Microsoft.Diagnostics.Tracing.Etlx;
 using Microsoft.Diagnostics.Tracing.Stacks;
@@ -15,7 +15,7 @@ namespace Repro
     class Program
     {
         static string[] _helpFlags = { "-h", "-?", "/h", "/?" };
-        static int Main(string[] args)
+        static async Task<int> Main(string[] args)
         {
             if (args.Length == 0 || args.Length > 1 || (args.Length == 1 && _helpFlags.Contains(args[0])))
             {
@@ -24,48 +24,26 @@ namespace Repro
             }
 
             var pid = int.Parse(args[0]);
-            ulong eventPipeSessionId = 0;
 
             var tempNetTraceFilename = Path.GetRandomFileName() + ".nettrace";
             var tempEtlxFilename = "";
 
             try
             {
-                var providers = new List<Provider>()
+                var client = new DiagnosticsClient(pid);
+                var providers = new List<EventPipeProvider>()
                 {
-                    new Provider("Microsoft-DotNETCore-SampleProfiler")
+                    new EventPipeProvider("Microsoft-DotNETCore-SampleProfiler", EventLevel.Informational)
                 };
 
-                var configuration = new SessionConfiguration(
-                    circularBufferSizeMB: 10,
-                    format: EventPipeSerializationFormat.NetTrace,
-                    providers: providers
-                );
-
-                var eventPipeStream = EventPipeClient.CollectTracing(pid, configuration, out eventPipeSessionId);
-                if (eventPipeSessionId == 0)
+                using (EventPipeSession session = client.StartEventPipeSession(providers))
+                using (FileStream fs = File.OpenWrite(tempNetTraceFilename))
                 {
-                    throw new Exception("Failed to create session...");
+                    Task copyTask = session.EventStream.CopyToAsync(fs);
+                    await Task.Delay(10);
+                    session.Stop();
+                    await copyTask;
                 }
-
-                var readerTask = new Task(() =>
-                {
-                    using (var file = File.OpenWrite(tempNetTraceFilename))
-                    {
-                        int b = 0;
-                        while ((b = eventPipeStream.ReadByte()) != -1)
-                            file.WriteByte((byte)b);
-                    }
-                });
-
-                readerTask.Start();
-
-                // Wait 500ms to ensure we get enough stack samples to have seen the first 
-                // stack from every thread.
-                Thread.Sleep(500);
-
-                EventPipeClient.StopTracing(pid, eventPipeSessionId);
-                readerTask.Wait();
 
                 tempEtlxFilename = TraceLog.CreateFromEventPipeDataFile(tempNetTraceFilename);
                 using (var symbolReader = new SymbolReader(System.IO.TextWriter.Null) { SymbolPath = SymbolPath.MicrosoftSymbolServerPath })
@@ -100,6 +78,9 @@ namespace Repro
 
                     foreach (var (threadName, samples) in samplesForThread)
                     {
+#if DEBUG
+                        Console.WriteLine($"Found {samples.Count} stacks for thread {threadName}");
+#endif
                         PrintStack(threadName, samples[0], stackSource);
                     }
                 }
@@ -123,9 +104,9 @@ namespace Repro
         {
             Console.WriteLine($"Stack for {threadName}:");
             var stackIndex = stackSourceSample.StackIndex;
-            while (!stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), false).StartsWith("Thread ("))
+            while (!stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false).StartsWith("Thread ("))
             {
-                Console.WriteLine($"  {stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), false)}");
+                Console.WriteLine($"  {stackSource.GetFrameName(stackSource.GetFrameIndex(stackIndex), verboseName: false)}");
                 stackIndex = stackSource.GetCallerIndex(stackIndex);
             }
             Console.WriteLine();
